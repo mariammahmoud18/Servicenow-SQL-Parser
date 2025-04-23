@@ -3,6 +3,7 @@
 function decode(sql) {
     var select = decoder(sql, /select\s+(.*?)\s+from/i);
     var from = decoder(sql, /from\s+([^\s;]+)/i);
+    var fromAlias = decoder(sql,/from\s+[^\s;]+(?:\s+as)?\s+([^\s;]+)/i);
     var where = decoder(sql, /where\s+(.*?)(order by|group by|limit|;|$)/i);
     var limit = decoder(sql, /limit\s+(\d+)/i);
     var groupBy = decoder(sql, /group\s+by\s+([\w,\s]+)/i);
@@ -10,6 +11,11 @@ function decode(sql) {
 
     var selectFields = [];
     var aggregateFields = [];
+    var tablesAliases = {};
+
+
+	if (fromAlias) {
+    tablesAliases[fromAlias] = from;}
 
     var gr = new GlideAggregate(from);
 
@@ -23,7 +29,7 @@ function decode(sql) {
 
 
 
-    parseSelectFields(from, select, selectFields, aggregateFields, gr);
+    parseSelectFields(from, select, selectFields, aggregateFields, gr, tablesAliases);
 
     if (groupBy) {
         var groupFields = groupBy.split(',').map(f => f.trim());
@@ -81,25 +87,64 @@ function getTableFieldNames(table) {
 }
 
 //used to differeniate between aggregate functions and normal select fields
-function parseSelectFields(from, select, selectFields, aggregateFields, gr) {
+function parseSelectFields(from, select, selectFields, aggregateFields, gr, tablesAliases) {
     var fields = select.split(',').map(f => f.trim());
 
     fields.forEach(field => {
-        var aggregateMatch = field.match(/(COUNT|AVG|SUM|MIN|MAX)\s*\((\w+)\)/i);
+        var aggregateMatch = field.match(/(COUNT|AVG|SUM|MIN|MAX)\s*\(([\w\.]+)\)/i);
+		gs.info(aggregateMatch);
+        // 1) Handle Aggregates (COUNT, AVG, etc.)
         if (aggregateMatch) {
-            var func = aggregateMatch[1].toUpperCase(); 
-            var fieldName = aggregateMatch[2]; 
-            aggregateFields.push({
-                func,
-                fieldName
-            });
-        } else if (field == '*') {
+            var func      = aggregateMatch[1].toUpperCase();
+            var fieldName = aggregateMatch[2];
+		
+            var dotMatch = fieldName.match(/^([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)$/);
+            if (dotMatch) {
+                var alias = dotMatch[1];
+                var realTable = tablesAliases[alias];
+                if (!realTable) {
+                    throw 'Unknown alias `' + alias + '` for field `' + fieldName + '`';
+                }
+                fieldName = dotMatch[2]; 
+            }
+
+            aggregateFields.push({ func, fieldName });
+            return;
+        }
+		// 2) alias.* expansion
+        var allMatch = field.match(/^([A-Za-z0-9_]+)\.\*$/);
+        if (allMatch) {
+            var alias = allMatch[1];
+            var realTable = tablesAliases[alias];
+            if (!realTable) {
+                throw 'Unknown alias `' + alias + '` for `*` expansion';
+            }
+            var cols = getTableFieldNames(realTable);
+            cols.forEach(col => selectFields.push(col));
+            return;
+        }
+
+        // 3) alias.field resolution
+        var dotMatch = field.match(/^([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)$/);
+        if (dotMatch) {
+            var alias = dotMatch[1];
+            var fieldName = dotMatch[2];
+            var realTable = tablesAliases[alias];
+            if (!realTable) {
+                throw 'Unknown alias `' + alias + '` for field `' + field + '`';
+            }
+            selectFields.push(fieldName);
+            return;
+        }
+        if (field == '*') {
             var allFields = getTableFieldNames(from);
             allFields.forEach(fieldName => {
                 selectFields.push(fieldName);
             });
+			return;
         } else {
             selectFields.push(field);
+			return;
         }
     });
 
